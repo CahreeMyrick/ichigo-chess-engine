@@ -1,0 +1,454 @@
+#include "rules.hpp"
+#include <cstdlib> // std::abs
+
+namespace chess {
+
+static int dr(int from, int to) { return rank_of(to) - rank_of(from); }
+static int df(int from, int to) { return file_of(to) - file_of(from); }
+
+bool Rules::is_friend(Piece moving, Piece target) {
+    if (is_empty(target)) return false;
+    return (is_white(moving) && is_white(target)) || (is_black(moving) && is_black(target));
+}
+
+bool Rules::is_opponent(Piece moving, Piece target) {
+    if (is_empty(target)) return false;
+    return (is_white(moving) && is_black(target)) || (is_black(moving) && is_white(target));
+}
+
+// Walk squares between from and to (exclusive). Assumes from->to is a straight/diag ray.
+bool Rules::path_clear(const Position& pos, int from, int to) {
+    int r0 = rank_of(from), f0 = file_of(from);
+    int r1 = rank_of(to),   f1 = file_of(to);
+
+    int step_r = (r1 > r0) ? 1 : (r1 < r0 ? -1 : 0);
+    int step_f = (f1 > f0) ? 1 : (f1 < f0 ? -1 : 0);
+
+    int r = r0 + step_r;
+    int f = f0 + step_f;
+    while (r != r1 || f != f1) {
+        int sq = make_sq(f, r);
+        if (!is_empty(pos.at(sq))) return false;
+        r += step_r;
+        f += step_f;
+    }
+    return true;
+}
+
+bool Rules::pseudo_knight(const Position& pos, Piece p, int from, int to, std::string& err) {
+    int r = std::abs(dr(from, to));
+    int f = std::abs(df(from, to));
+    if (!((r == 2 && f == 1) || (r == 1 && f == 2))) {
+        err = "Knight moves in an L (2+1).";
+        return false;
+    }
+    Piece target = pos.at(to);
+    if (is_friend(p, target)) {
+        err = "Cannot capture your own piece.";
+        return false;
+    }
+    return true;
+}
+
+bool Rules::pseudo_bishop(const Position& pos, Piece p, int from, int to, std::string& err) {
+    int r = std::abs(dr(from, to));
+    int f = std::abs(df(from, to));
+    if (r == 0 || f == 0 || r != f) {
+        err = "Bishop moves diagonally.";
+        return false;
+    }
+    if (!path_clear(pos, from, to)) {
+        err = "Bishop path is blocked.";
+        return false;
+    }
+    Piece target = pos.at(to);
+    if (is_friend(p, target)) {
+        err = "Cannot capture your own piece.";
+        return false;
+    }
+    return true;
+}
+
+bool Rules::pseudo_rook(const Position& pos, Piece p, int from, int to, std::string& err) {
+    int r = dr(from, to);
+    int f = df(from, to);
+    if (!((r == 0 && f != 0) || (f == 0 && r != 0))) {
+        err = "Rook moves in straight lines.";
+        return false;
+    }
+    if (!path_clear(pos, from, to)) {
+        err = "Rook path is blocked.";
+        return false;
+    }
+    Piece target = pos.at(to);
+    if (is_friend(p, target)) {
+        err = "Cannot capture your own piece.";
+        return false;
+    }
+    return true;
+}
+
+bool Rules::pseudo_queen(const Position& pos, Piece p, int from, int to, std::string& err) {
+    int r = std::abs(dr(from, to));
+    int f = std::abs(df(from, to));
+
+    bool diag = (r != 0 && f != 0 && r == f);
+    bool straight = (r == 0 && f != 0) || (f == 0 && r != 0);
+
+    if (!(diag || straight)) {
+        err = "Queen moves like rook or bishop.";
+        return false;
+    }
+    if (!path_clear(pos, from, to)) {
+        err = "Queen path is blocked.";
+        return false;
+    }
+    Piece target = pos.at(to);
+    if (is_friend(p, target)) {
+        err = "Cannot capture your own piece.";
+        return false;
+    }
+    return true;
+}
+
+static bool is_adjacent_king_move(int from, int to) {
+    int rd = std::abs(rank_of(to) - rank_of(from));
+    int fd = std::abs(file_of(to) - file_of(from));
+    return (rd <= 1 && fd <= 1) && !(rd == 0 && fd == 0);
+}
+
+bool Rules::pseudo_king(const Position& pos, Piece p, int from, int to, std::string& err) {
+    // Castling attempt: king moves two squares horizontally
+    if (rank_of(from) == rank_of(to) && std::abs(file_of(to) - file_of(from)) == 2) {
+	    // pseudo-level: allow if basic structural constraints are met (rights/emptiness/rook)
+	    // Full "through check" constraints handled in castle_path_safe during legal filtering.
+        std::string e2;
+	if (!castle_path_safe(pos, Move{(uint8_t)from,(uint8_t)to}, e2)) {
+	    err = e2;
+	    return false;
+	}
+	return true;
+    }
+
+
+    if (!is_adjacent_king_move(from, to)) {
+        err = "King moves one square in any direction (castling not implemented yet).";
+        return false;
+    }
+
+    Piece target = pos.at(to);
+    if (is_friend(p, target)) {
+        err = "Cannot capture your own piece.";
+        return false;
+    }
+
+    // NOTE: This does NOT prevent moving into check yet.
+    return true;
+}
+
+bool Rules::pseudo_pawn(const Position& pos, Piece p, const Move& m, std::string& err) {
+    const int from = m.from;
+    const int to   = m.to;
+
+    const bool white = is_white(p);
+    const int dir = white ? +1 : -1;
+    const int start_rank = white ? 1 : 6;
+    const int last_rank  = white ? 7 : 0;
+
+    // --- Promotion validation ---
+    const bool promotes = (rank_of(to) == last_rank);
+
+    if (!promotes && m.promo != PROMO_NONE) {
+        err = "Promotion choice only allowed when reaching last rank.";
+        return false;
+    }
+    if (promotes) {
+        if (!(m.promo == PROMO_NONE ||
+              m.promo == PROMO_Q ||
+              m.promo == PROMO_R ||
+              m.promo == PROMO_B ||
+              m.promo == PROMO_N)) {
+            err = "Invalid promotion piece (use q/r/b/n).";
+            return false;
+        }
+    }
+
+    int r = dr(from, to);
+    int f = df(from, to);
+    Piece target = pos.at(to);
+
+    if (f == 0) {
+        if (r == dir) {
+            if (!is_empty(target)) { err = "Pawn forward move must land on empty."; return false; }
+            return true;
+        }
+        if (r == 2 * dir) {
+            // double-step cannot be a promotion (won't reach last rank from start rank anyway)
+            if (rank_of(from) != start_rank) { err = "Pawn double-step only from start rank."; return false; }
+            if (!is_empty(target)) { err = "Pawn double-step must land on empty."; return false; }
+            int mid = make_sq(file_of(from), rank_of(from) + dir);
+            if (!is_empty(pos.at(mid))) { err = "Pawn double-step is blocked."; return false; }
+            return true;
+        }
+        err = "Invalid pawn forward move distance.";
+        return false;
+    }
+
+    // Diagonal capture (including en passant)
+    if (std::abs(f) == 1 && r == dir) {
+        // normal capture
+        if (is_opponent(p, target)) return true;
+
+        // en passant: target square empty, but equals ep square, and captured pawn exists behind
+        if (is_empty(target) && pos.ep_square() == to) {
+            int cap_r = rank_of(to) - dir;              // square behind destination
+            int cap_f = file_of(to);
+            int cap_sq = make_sq(cap_f, cap_r);
+            Piece cap = pos.at(cap_sq);
+
+            // captured pawn must be opponent pawn
+            if (white && cap == Piece::BP) return true;
+            if (!white && cap == Piece::WP) return true;
+
+            err = "En passant square set but no capturable pawn found.";
+            return false;
+        }
+
+        err = "Pawn diagonal must capture (or be en passant).";
+        return false;
+    }
+
+    err = "Invalid pawn move.";
+    return false;
+}
+
+
+bool Rules::is_pseudo_legal(const Position& pos, const Move& m, std::string& err) {
+    err.clear();
+
+    if (m.from > 63 || m.to > 63) { err = "Move squares out of range."; return false; }
+    if (m.from == m.to) { err = "From and to squares are the same."; return false; }
+
+    Piece moving = pos.at(m.from);
+    if (is_empty(moving)) { err = "No piece on the from-square."; return false; }
+
+    if (pos.side_to_move() == Color::White && !is_white(moving)) { err = "It's White to move."; return false; }
+    if (pos.side_to_move() == Color::Black && !is_black(moving)) { err = "It's Black to move."; return false; }
+
+    Piece target = pos.at(m.to);
+    if (is_friend(moving, target)) { err = "Cannot capture your own piece."; return false; }
+
+    switch (moving) {
+       
+        case Piece::WP:
+        case Piece::BP: return pseudo_pawn(pos, moving, m, err);
+
+        case Piece::WN:
+        case Piece::BN: return pseudo_knight(pos, moving, m.from, m.to, err);
+
+        case Piece::WB:
+        case Piece::BB: return pseudo_bishop(pos, moving, m.from, m.to, err);
+
+        case Piece::WR:
+        case Piece::BR: return pseudo_rook(pos, moving, m.from, m.to, err);
+
+        case Piece::WQ:
+        case Piece::BQ: return pseudo_queen(pos, moving, m.from, m.to, err);
+	
+        case Piece::WK:
+        case Piece::BK: return pseudo_king(pos, moving, m.from, m.to, err);
+
+        default:
+            err = "Unkown piece or not implemented";
+            return false;
+    }
+}
+int Rules::find_king(const Position& pos, Color who) {
+    Piece k = (who == Color::White) ? Piece::WK : Piece::BK;
+    for (int sq = 0; sq < 64; ++sq) {
+        if (pos.at(sq) == k) return sq;
+    }
+    return -1;
+}
+
+// --- Attack detection ---
+// NOTE: pawn attacks differ from pawn forward moves.
+static bool adjacent(int a, int b) {
+    int rd = std::abs(rank_of(b) - rank_of(a));
+    int fd = std::abs(file_of(b) - file_of(a));
+    return (rd <= 1 && fd <= 1) && !(rd == 0 && fd == 0);
+}
+
+static bool knight_attack(int from, int to) {
+    int r = std::abs(rank_of(to) - rank_of(from));
+    int f = std::abs(file_of(to) - file_of(from));
+    return (r == 2 && f == 1) || (r == 1 && f == 2);
+}
+bool Rules::is_square_attacked(const Position& pos, int sq, Color by) {
+    // Pawn attacks
+    // White pawns attack (file±1, rank+1). Black pawns attack (file±1, rank-1).
+    {
+        int f = file_of(sq), r = rank_of(sq);
+        if (by == Color::White) {
+            // attackers are on r-1
+            int r_from = r - 1;
+            if (r_from >= 0) {
+                if (f - 1 >= 0 && pos.at(make_sq(f - 1, r_from)) == Piece::WP) return true;
+                if (f + 1 <  8 && pos.at(make_sq(f + 1, r_from)) == Piece::WP) return true;
+            }
+        } else {
+            // black attackers are on r+1
+            int r_from = r + 1;
+            if (r_from < 8) {
+                if (f - 1 >= 0 && pos.at(make_sq(f - 1, r_from)) == Piece::BP) return true;
+                if (f + 1 <  8 && pos.at(make_sq(f + 1, r_from)) == Piece::BP) return true;
+            }
+        }
+    }
+
+    // Knight attacks
+    {
+        Piece n = (by == Color::White) ? Piece::WN : Piece::BN;
+        for (int from = 0; from < 64; ++from) {
+            if (pos.at(from) == n && knight_attack(from, sq)) return true;
+        }
+    }
+
+    // King attacks (adjacent)
+    {
+        Piece k = (by == Color::White) ? Piece::WK : Piece::BK;
+        for (int from = 0; from < 64; ++from) {
+            if (pos.at(from) == k && adjacent(from, sq)) return true;
+        }
+    }
+
+    // Sliding attacks: bishops/queens on diagonals, rooks/queens on lines
+    auto ray_hits = [&](int df_step, int dr_step, Piece a, Piece b) -> bool {
+        int f = file_of(sq) + df_step;
+        int r = rank_of(sq) + dr_step;
+        while (f >= 0 && f < 8 && r >= 0 && r < 8) {
+            Piece x = pos.at(make_sq(f, r));
+            if (!is_empty(x)) return (x == a || x == b);
+            f += df_step;
+            r += dr_step;
+        }
+        return false;
+    };
+
+    if (by == Color::White) {
+        // Diagonals: WB/WQ
+        if (ray_hits(+1,+1, Piece::WB, Piece::WQ)) return true;
+        if (ray_hits(-1,+1, Piece::WB, Piece::WQ)) return true;
+        if (ray_hits(+1,-1, Piece::WB, Piece::WQ)) return true;
+        if (ray_hits(-1,-1, Piece::WB, Piece::WQ)) return true;
+
+        // Straights: WR/WQ
+        if (ray_hits(+1, 0, Piece::WR, Piece::WQ)) return true;
+        if (ray_hits(-1, 0, Piece::WR, Piece::WQ)) return true;
+        if (ray_hits( 0,+1, Piece::WR, Piece::WQ)) return true;
+        if (ray_hits( 0,-1, Piece::WR, Piece::WQ)) return true;
+    } else {
+        // Diagonals: BB/BQ
+        if (ray_hits(+1,+1, Piece::BB, Piece::BQ)) return true;
+        if (ray_hits(-1,+1, Piece::BB, Piece::BQ)) return true;
+        if (ray_hits(+1,-1, Piece::BB, Piece::BQ)) return true;
+        if (ray_hits(-1,-1, Piece::BB, Piece::BQ)) return true;
+
+        // Straights: BR/BQ
+        if (ray_hits(+1, 0, Piece::BR, Piece::BQ)) return true;
+        if (ray_hits(-1, 0, Piece::BR, Piece::BQ)) return true;
+        if (ray_hits( 0,+1, Piece::BR, Piece::BQ)) return true;
+        if (ray_hits( 0,-1, Piece::BR, Piece::BQ)) return true;
+    }
+
+    return false;
+}
+
+
+bool Rules::in_check(const Position& pos, Color who) {
+    int ksq = find_king(pos, who);
+    if (ksq < 0) return false; // or treat as invalid position
+    return is_square_attacked(pos, ksq, other(who));
+}
+
+bool Rules::is_castle_move(const Position& pos, const Move& m) {
+    Piece moving = pos.at(m.from);
+    if (!(moving == Piece::WK || moving == Piece::BK)) return false;
+
+    int r0 = rank_of(m.from), f0 = file_of(m.from);
+    int r1 = rank_of(m.to),   f1 = file_of(m.to);
+    if (r0 != r1) return false;
+    return std::abs(f1 - f0) == 2;
+}
+
+// This checks the special "king passes through attacked squares" constraint
+// AND basic castle constraints that pseudo-movegen assumes.
+bool Rules::castle_path_safe(const Position& pos, const Move& m, std::string& err) {
+    err.clear();
+
+    Piece k = pos.at(m.from);
+    if (!(k == Piece::WK || k == Piece::BK)) {
+        err = "Not a king castling move.";
+        return false;
+    }
+
+    Color side = (k == Piece::WK) ? Color::White : Color::Black;
+
+    // Must not be in check at start
+    if (Rules::in_check(pos, side)) {
+        err = "Cannot castle while in check.";
+        return false;
+    }
+
+    int from = m.from;
+    int to   = m.to;
+
+    int r = rank_of(from);
+    int f_from = file_of(from);
+    int f_to   = file_of(to);
+
+    bool king_side = (f_to > f_from);
+
+    // Determine squares the king passes through:
+    // e1->g1 passes through f1; e1->c1 passes through d1
+    int through = make_sq(f_from + (king_side ? +1 : -1), r);
+
+    // Squares king goes through or lands on must not be attacked
+    if (Rules::is_square_attacked(pos, through, other(side))) {
+        err = "Cannot castle through check.";
+        return false;
+    }
+    if (Rules::is_square_attacked(pos, to, other(side))) {
+        err = "Cannot castle into check.";
+        return false;
+    }
+
+    // Also ensure rook exists and squares between are empty (defensive)
+    if (side == Color::White) {
+        if (king_side) {
+            if (!has_right(pos.castling_rights(), CR_WK)) { err = "No white king-side rights."; return false; }
+            if (pos.at(make_sq(5,0)) != Piece::Empty || pos.at(make_sq(6,0)) != Piece::Empty) { err = "Squares not empty."; return false; }
+            if (pos.at(make_sq(7,0)) != Piece::WR) { err = "Rook missing on h1."; return false; }
+        } else {
+            if (!has_right(pos.castling_rights(), CR_WQ)) { err = "No white queen-side rights."; return false; }
+            if (pos.at(make_sq(3,0)) != Piece::Empty || pos.at(make_sq(2,0)) != Piece::Empty || pos.at(make_sq(1,0)) != Piece::Empty) { err = "Squares not empty."; return false; }
+            if (pos.at(make_sq(0,0)) != Piece::WR) { err = "Rook missing on a1."; return false; }
+        }
+    } else {
+        if (king_side) {
+            if (!has_right(pos.castling_rights(), CR_BK)) { err = "No black king-side rights."; return false; }
+            if (pos.at(make_sq(5,7)) != Piece::Empty || pos.at(make_sq(6,7)) != Piece::Empty) { err = "Squares not empty."; return false; }
+            if (pos.at(make_sq(7,7)) != Piece::BR) { err = "Rook missing on h8."; return false; }
+        } else {
+            if (!has_right(pos.castling_rights(), CR_BQ)) { err = "No black queen-side rights."; return false; }
+            if (pos.at(make_sq(3,7)) != Piece::Empty || pos.at(make_sq(2,7)) != Piece::Empty || pos.at(make_sq(1,7)) != Piece::Empty) { err = "Squares not empty."; return false; }
+            if (pos.at(make_sq(0,7)) != Piece::BR) { err = "Rook missing on a8."; return false; }
+        }
+    }
+
+    return true;
+}
+
+
+} // namespace chess
+
