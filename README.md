@@ -1,4 +1,4 @@
-# Ichico Chess Engine
+# Ichigo Chess Engine
 A modern C++ chess engine that focuses correctness and clean design. The engine supports  **full legal chess rules**, **perft-verified move generation**,  and a **minimax AI with alpa-beta pruning**, playable via a simple CLI.
 
 This project was built deliberately **without external chess libraries** to practice large software system design and developemnt with C++.
